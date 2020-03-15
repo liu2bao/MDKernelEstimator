@@ -68,7 +68,7 @@ class PredictResult:
 
 
 class Estimator:
-    def __init__(self, x_train, y_train, k_n, m=None, cal_dist_mode=0):
+    def __init__(self, x_train, y_train, k_n, m=None, cal_dist_mode=0, convert_dist_mode=0):
         self.T, self.D = x_train.shape
         if m is None:
             m = np.eye(self.D)
@@ -79,6 +79,7 @@ class Estimator:
         self.__y_train_predict = None
         self.__paras_train = None
         self.cal_dist_mode = cal_dist_mode
+        self.convert_dist_mode = convert_dist_mode
         self.__predict_prepared = False
         self.__predicted_within_train = False
         self.__predict_result = PredictResult()
@@ -158,11 +159,21 @@ class Estimator:
         if self.cal_dist_mode == 0:
             s = -dist
         elif self.cal_dist_mode == 1:
+            dist += 0.0000001
             s = 1 / dist
-            s[np.isinf(dist)] = -float('inf')
-        else:
+            # s[np.isinf(dist)] = -float('inf')
+        elif self.cal_dist_mode == 2:
             s = 1 / dist - dist
-        y_test_pdf = np.array([softmax(self.KN * dt) for dt in s])
+        elif callable(self.cal_dist_mode):
+            s = self.cal_dist_mode(dist)
+            print('self-defined distance converter called')
+        else:
+            s = -dist
+
+        if callable(self.convert_dist_mode):
+            y_test_pdf = np.array([self.convert_dist_mode(self.KN * dt) for dt in s])
+        else:
+            y_test_pdf = np.array([softmax(self.KN * dt) for dt in s])
         y_test_predict = np.matmul(y_test_pdf, self._Y_train)
         return y_test_predict, y_test_pdf
 
@@ -176,11 +187,11 @@ class Estimator:
         if (self.__y_train_predict is None) or (not self.__predicted_within_train) or refresh:
             dist = self.cal_dist(self.mat_x_train)
             dist += np.diag([np.inf] * self.T)
-            self.__y_train_predict = self.predict_from_dist(dist)
+            self.__y_train_predict = self.predict_from_dist(dist)[0]
             self.__predicted_within_train = True
         return self.__y_train_predict
 
-    def get_pdf(self, h_w=0.1, num_div=10000, bandwidth=0.5):
+    def get_pdf(self, h_w=0.01, num_div=2000, bandwidth=0.5):
         idx_sort_temp = np.argsort(self.mat_y_train)
         y_sorted = self.mat_y_train[idx_sort_temp]
         mat_pdf_sorted = self.predict_result.y_test_pdf[:, idx_sort_temp]
@@ -189,11 +200,13 @@ class Estimator:
         mat_exp = 1 / np.sqrt(2 * np.pi) / h_w * np.exp(-np.square(mat_y_diff) / (2 * h_w * h_w))
         self.predict_result.pdf_continuous = np.matmul(mat_pdf_sorted, mat_exp)
         self.predict_result.y_predict_continuous = vec_y_pdf
+        if self.predict_result.pdf_continuous.shape[0]==1:
+            self.predict_result.pdf_continuous = self.predict_result.pdf_continuous.flatten()
         return self.predict_result.y_predict_continuous, self.predict_result.pdf_continuous
 
 
 class ParaHolder:
-    def __init__(self, batch_size=100, epochs=100, kn_0=1, reg_alpha=1e-6, dict_para_optimizer=None, Tmax=None):
+    def __init__(self, batch_size=100, epochs=100, kn_0=1, reg_alpha=1e-6, dict_para_optimizer=None, Tmax=None, tol=0):
         if dict_para_optimizer is None:
             dict_para_optimizer = {'learning_rate': 1, 'beta1': 0.9, 'beta2': 0.999, 'epsilon': 1e-8}
         self.reg_alpha = reg_alpha
@@ -213,6 +226,7 @@ class ParaHolder:
         self.r_WMM = None
         self.r_WM = None
         self.r_loss = None
+        self.r_loss_old = None
         self.r_my_loss = None
         self.r_Y_predict = None
         self.r_DistP = None
@@ -234,6 +248,7 @@ class ParaHolder:
         self.use_test = False
         self.X_test_comp = None
         self.Y_test_comp = None
+        self.tol = tol
 
 
 class ParaHolderTF:
@@ -298,9 +313,9 @@ class ParaSaver:
 
 
 class DistanceTrainer:
-    def __init__(self, batch_size=100, epochs=100, kn_0=1, reg_alpha=1e-6, dict_para_optimizer=None, Tmax=None):
+    def __init__(self, batch_size=100, epochs=100, kn_0=1, reg_alpha=1e-6, dict_para_optimizer=None, Tmax=None, tol=0):
         self.ph = ParaHolder(batch_size=batch_size, epochs=epochs, kn_0=kn_0, reg_alpha=reg_alpha,
-                             dict_para_optimizer=dict_para_optimizer, Tmax=Tmax)
+                             dict_para_optimizer=dict_para_optimizer, Tmax=Tmax, tol=tol)
         self.ph_tf = ParaHolderTF()
         self.ps = ParaSaver()
 
@@ -365,7 +380,7 @@ class DistanceTrainer:
                         times[idx_sel] += 1
 
                     self.gradient_descent(mat_x_train_t, vec_y_train_t)
-                    loss_show = np.sqrt(self.ph.r_loss * 2 / self.ph.real_size) * 1e3
+                    loss_show = np.sqrt(self.ph.r_loss * 2 / self.ph.batch_size) * 1e3
                     if self.ph.min_loss > loss_show:
                         self.ph.min_loss = loss_show
                         self.ph.min_loss_epoch = epoch
@@ -393,6 +408,10 @@ class DistanceTrainer:
                         # acct = 100-((loss_show-3)/2+3)
                         # print('%.3f %.3f' % (acct, t0-t00))
                         t0 = time.time()
+                    if self.ph.r_loss_old:
+                        if np.abs(self.ph.r_loss-self.ph.r_loss_old)<self.ph.tol:
+                            break
+                    self.ph.r_loss_old = self.ph.r_loss
 
     def init_issue(self, Xtrain, Ytrain, Xtest=None, Ytest=None):
         size_temp, dim = Xtrain.shape
