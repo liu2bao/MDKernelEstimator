@@ -56,6 +56,7 @@ class ParaHolderOrth:
         self.r_KN = None
         self.r_KN_opt = None
         self.r_AD = None
+        self.r_rotvecraw = None
         self.r_rotvec = None
         self.full_batch = False
         self.min_loss = float('inf')
@@ -87,6 +88,7 @@ class ParaHolderTFOrth:
         self.wvec_ = None
         self.P_ = None
         self.m_ = None
+        self.rotvecraw_ = None
         self.rotvec_ = None
         self.AM = None
         self.Ad = None
@@ -163,11 +165,12 @@ class DistanceTrainerOrth:
             }
         self.ph_tf.opt, self.ph.r_loss, self.ph.r_my_loss, self.ph.r_m, self.ph.r_Y_predict, self.ph.r_IMatch, self.ph.r_Dist, \
         self.ph.r_DistR, self.ph.r_DistRR, self.ph.r_DistP, self.ph.r_KN, self.ph.r_AD, \
-        self.ph.r_wvecraw, self.ph.r_wvec, self.ph.r_P, self.ph.r_rotvec = \
+        self.ph.r_wvecraw, self.ph.r_wvec, self.ph.r_P, self.ph.r_rotvecraw, self.ph.r_rotvec = \
             self.ph_tf.sess.run(
             (self.ph_tf.train, self.ph_tf.loss, self.ph_tf.my_loss, self.ph_tf.m_, self.ph_tf.Y_predict, self.ph_tf.IMatch, self.ph_tf.Dist,
              self.ph_tf.DistR, self.ph_tf.DistRR, self.ph_tf.DistP, self.ph_tf.KN, self.ph_tf.AD,
-             self.ph_tf.wvecraw_, self.ph_tf.wvec_, self.ph_tf.P_, self.ph_tf.rotvec_), feed_dict=feed_dict)
+             self.ph_tf.wvecraw_, self.ph_tf.wvec_, self.ph_tf.P_, self.ph_tf.rotvecraw_, self.ph_tf.rotvec_),
+                feed_dict=feed_dict)
 
         if np.any(self.ph.r_Dist < 0):
             pass
@@ -252,12 +255,13 @@ class DistanceTrainerOrth:
             self.ph_tf.SubXTrain = tf.constant(Xtrain, dtype=tf.float64)
             self.ph_tf.SubYTrain = tf.constant(Ytrain, dtype=tf.float64)
 
-        if self.ph.r_rotvec is None:
-            rotvec_init = np.zeros(dim-1)
+        if self.ph.r_rotvecraw is None:
+            rotvecraw_init = np.zeros(dim-1)
         else:
-            rotvec_init = self.ph.r_rotvec
+            rotvecraw_init = self.ph.r_rotvecraw
 
-        self.ph_tf.rotvec_ = tf.Variable(rotvec_init, dtype=tf.float64)
+        self.ph_tf.rotvecraw_ = tf.Variable(rotvecraw_init, dtype=tf.float64)
+        self.ph_tf.rotvec_ = tf.nn.sigmoid(self.ph_tf.rotvecraw_)*2*np.pi
         self.ph_tf.P_ = tf.constant(np.eye(dim), dtype=tf.float64)
 
         for d in range(dim-1):
@@ -271,7 +275,7 @@ class DistanceTrainerOrth:
             ohmat_temp = tf.matmul(tf.reshape(tf.one_hot(d+1,dim,dtype=tf.float64),(dim,1)),
                                    tf.reshape(tf.one_hot(d,dim,dtype=tf.float64),(1,dim)))
             ohmat_temp += (-tf.transpose(ohmat_temp))
-            Rsubt += (ohmat_temp*tf.sin(self.ph_tf.rotvec_[d]))
+            Rsubt += (ohmat_temp * tf.sin(self.ph_tf.rotvec_[d]))
             self.ph_tf.P_ = tf.matmul(self.ph_tf.P_, Rsubt)
 
         if self.ph.r_wvecraw is None:
@@ -281,7 +285,7 @@ class DistanceTrainerOrth:
 
         self.ph_tf.wvecraw_ = tf.Variable(wvecraw_init, dtype=tf.float64)
         self.ph_tf.wvec_ = tf.nn.softmax(self.ph_tf.wvecraw_)
-        self.ph_tf.m_ = tf.matmul(self.ph_tf.P_*self.ph_tf.wvec_, self.ph_tf.P_, transpose_b=True)
+        self.ph_tf.m_ = tf.matmul(tf.matmul(self.ph_tf.P_,tf.diag(self.ph_tf.wvec_)), self.ph_tf.P_, transpose_b=True)
 
         if flag_test_exists:
             self.ph_tf.Ad = tf.reduce_sum(tf.matmul(self.ph_tf.SubXTrain, self.ph_tf.m_) * self.ph_tf.SubXTrain, axis=1)
